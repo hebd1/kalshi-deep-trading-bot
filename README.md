@@ -274,6 +274,10 @@ The bot handles various error scenarios:
 - **Decision Making**: Relies on OpenAI's analysis capabilities
 - **Risk Management**: Basic position sizing and confidence thresholds only
 
+## Built By
+
+This project is built by **[Octagon AI](https://octagonai.co)** – AI-powered research and analysis for prediction markets.
+
 ## License
 
 This project is for educational and research purposes. Use at your own risk.
