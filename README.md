@@ -1,6 +1,6 @@
 # Kalshi Deep Trading Bot
 
-A straightforward trading bot for Kalshi prediction markets that uses Octagon Deep Research for market analysis and OpenAI for structured betting decisions.
+A straightforward trading bot for Kalshi prediction markets that uses Octagon Deep Research for market analysis and XAI/Grok for structured betting decisions with web search capabilities.
 
 ![Trading Bot Flowchart](KalshiDeepTradingBot.png)
 
@@ -26,13 +26,13 @@ The bot follows a simple 6-step workflow:
 2. **Process Markets**: Uses top 10 highest volume markets per event
 3. **Research Events**: Uses Octagon Deep Research to analyze event + markets (without odds)
 4. **Fetch Market Odds**: Gets current bid/ask prices for all markets
-5. **Make Decisions**: Feeds research results and market odds into OpenAI for structured betting decisions
+5. **Make Decisions**: Feeds research results and market odds into XAI/Grok for structured betting decisions (with optional web search)
 6. **Place Bets**: Executes the recommended bets via Kalshi API
 
 ## Features
 
 - **Simple & Direct**: No complex strategies or risk management systems
-- **AI-Powered**: Uses Octagon Deep Research for market analysis and OpenAI for decision making
+- **AI-Powered**: Uses Octagon Deep Research for market analysis and XAI/Grok for decision making with real-time web search
 - **Event-Based**: Analyzes entire events with all markets for better context
 - **Flexible Environment**: Supports both demo and production environments
 - **Dry Run Mode**: Test the bot without placing real bets
@@ -64,7 +64,7 @@ cp env_template.txt .env
 Required API keys:
 - **Kalshi API**: Get from [kalshi.com](https://docs.kalshi.com/getting_started/api_keys) or [demo.kalshi.co](https://demo.kalshi.co)
 - **Octagon API**: Get from [app.octagonai.co](https://app.octagonai.co/signup)
-- **OpenAI API**: Get from [platform.openai.com](https://platform.openai.com/api-keys)
+- **XAI API**: Get from [console.x.ai](https://console.x.ai/)
 
 ### 4. Run the Bot
 

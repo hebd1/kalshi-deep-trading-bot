@@ -1,7 +1,7 @@
 [project]
 name = "kalshi-trading-bot"
 version = "1.0.0"
-description = "Simple Kalshi trading bot with Octagon research and OpenAI decision making"
+description = "Simple Kalshi trading bot with Octagon research and XAI/Grok decision making"
 authors = [
     {name = "Octagon", email = "support@octagon.ai"}
 ]
@@ -16,7 +16,7 @@ dependencies = [
     "loguru>=0.7.0",
     "rich>=13.0.0",
     "cryptography>=41.0.0",
-    "openai>=1.0.0",
+    "requests>=2.28.0",
 ]
 
 [project.optional-dependencies]
@@ -41,6 +41,7 @@ include = [
     "kalshi_client.py",
     "research_client.py",
     "betting_models.py",
+    "xai_utils.py",
 ]
 
 [tool.black]

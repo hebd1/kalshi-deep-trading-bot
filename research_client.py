@@ -1,7 +1,7 @@
 """
-Simple Octagon Deep Research API client using OpenAI SDK.
+Simple Octagon Deep Research API client using httpx.
 """
-import openai
+import httpx
 import json
 from typing import Dict, Any, Optional, List
 from loguru import logger
@@ -9,14 +9,17 @@ from config import OctagonConfig
 
 
 class OctagonClient:
-    """Simple client for Octagon Deep Research API using OpenAI SDK."""
+    """Simple client for Octagon Deep Research API using httpx."""
     
     def __init__(self, config: OctagonConfig):
         self.config = config
-        self.client = openai.AsyncOpenAI(
-            api_key=config.api_key,
+        self.client = httpx.AsyncClient(
             base_url=config.base_url,
-            timeout=1800.0  # 30 minutes timeout for deep research
+            headers={
+                "Authorization": f"Bearer {config.api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=httpx.Timeout(1800.0)  # 30 minutes timeout for deep research
         )
     
     async def research_event(self, event: Dict[str, Any], markets: List[Dict[str, Any]]) -> str:
@@ -85,32 +88,46 @@ class OctagonClient:
             event_ticker = event.get('event_ticker', 'UNKNOWN')
             logger.info(f"Starting deep research for event {event_ticker} (this may take several minutes)...")
             
-            # Use Responses API to handle models that may return reasoning + message
-            response = await self.client.responses.create(
-                model="octagon-deep-research-agent",
-                input=[{"role": "user", "content": prompt}],
-                reasoning={"effort": "low"},
-                text={"verbosity": "medium"}
+            # Use Responses API via httpx
+            response = await self.client.post(
+                "/responses",
+                json={
+                    "model": "octagon-deep-research-agent",
+                    "input": [{"role": "user", "content": prompt}],
+                    "reasoning": {"effort": "low"},
+                    "text": {"verbosity": "medium"}
+                }
             )
+            response.raise_for_status()
+            data = response.json()
 
             logger.info(f"Completed deep research for event {event_ticker}")
 
-            # Extract the completed assistant message content safely
-            try:
-                from openai_utils import extract_completed_message_text
-                content_text = extract_completed_message_text(response)
-                if content_text:
-                    return content_text
-            except Exception:
-                pass
-
-            # Fallback: return empty string if nothing could be extracted
-            return ""
+            # Extract the completed assistant message content
+            content_text = self._extract_completed_message_text(data)
+            return content_text if content_text else ""
             
         except Exception as e:
             logger.error(f"Error researching event {event.get('event_ticker', '')}: {e}")
             return f"Error researching event: {str(e)}"
     
+    def _extract_completed_message_text(self, response: Dict[str, Any]) -> str:
+        """Extract plain text from the completed assistant message."""
+        text_chunks: List[str] = []
+        
+        output_items = response.get("output", [])
+        for item in output_items:
+            if item.get("type") == "message" and item.get("status") == "completed":
+                content = item.get("content", [])
+                for part in content:
+                    if part.get("type") == "output_text":
+                        text_value = part.get("text", "")
+                        if text_value:
+                            text_chunks.append(text_value)
+                break
+        
+        return "".join(text_chunks).strip()
+    
     async def close(self):
-        """Close the client (OpenAI client doesn't need explicit closing)."""
-        pass 
+        """Close the httpx client."""
+        await self.client.aclose() 

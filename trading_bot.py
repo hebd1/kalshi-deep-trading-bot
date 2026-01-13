@@ -1,5 +1,5 @@
 """
-Simple Kalshi trading bot with Octagon research and OpenAI decision making.
+Simple Kalshi trading bot with Octagon research and XAI/Grok decision making.
 """
 import asyncio
 import argparse
@@ -11,6 +11,7 @@ import datetime
 import math
 from pathlib import Path
 import sys
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -21,11 +22,78 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from loguru import logger
 import re
 
+
+def setup_logging(log_dir: str = "logs", log_level: str = "DEBUG", rotation: str = "10 MB", retention: str = "30 days"):
+    """
+    Configure loguru to write logs to files with rotation.
+    
+    Args:
+        log_dir: Directory to store log files
+        log_level: Minimum log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        rotation: When to rotate log files (e.g., "10 MB", "1 day", "00:00")
+        retention: How long to keep old log files (e.g., "30 days", "10 files")
+    """
+    # Create logs directory if it doesn't exist
+    log_path = Path(log_dir)
+    log_path.mkdir(parents=True, exist_ok=True)
+    
+    # Remove default handler (console only)
+    logger.remove()
+    
+    # Add console handler with colorful output
+    logger.add(
+        sys.stderr,
+        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+        level=log_level,
+        colorize=True
+    )
+    
+    # Add main log file - all logs
+    logger.add(
+        log_path / "trading_bot_{time:YYYY-MM-DD}.log",
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
+        level=log_level,
+        rotation=rotation,
+        retention=retention,
+        compression="zip",
+        enqueue=True,  # Thread-safe logging
+        backtrace=True,  # Show full traceback on exceptions
+        diagnose=True   # Show variable values in tracebacks
+    )
+    
+    # Add error-only log file for quick issue identification
+    logger.add(
+        log_path / "errors_{time:YYYY-MM-DD}.log",
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
+        level="ERROR",
+        rotation=rotation,
+        retention=retention,
+        compression="zip",
+        enqueue=True,
+        backtrace=True,
+        diagnose=True
+    )
+    
+    # Add trades log file - for tracking all trading decisions and executions
+    logger.add(
+        log_path / "trades_{time:YYYY-MM-DD}.log",
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {message}",
+        level="INFO",
+        filter=lambda record: "TRADE" in record["message"] or "BET" in record["message"] or "ORDER" in record["message"],
+        rotation=rotation,
+        retention=retention,
+        compression="zip",
+        enqueue=True
+    )
+    
+    logger.info(f"Logging initialized - logs directory: {log_path.absolute()}")
+    logger.debug(f"Log level: {log_level}, Rotation: {rotation}, Retention: {retention}")
+
 from kalshi_client import KalshiClient
 from research_client import OctagonClient
 from betting_models import BettingDecision, MarketAnalysis, ProbabilityExtraction
 from config import load_config
-import openai
+from xai_utils import XAIClient, async_chat_completion_parse_pydantic, MODEL_PREMIUM
 
 
 class SimpleTradingBot:
@@ -38,7 +106,7 @@ class SimpleTradingBot:
         self.console = Console()
         self.kalshi_client = None
         self.research_client = None
-        self.openai_client = None
+        self.xai_client = None
         self.max_close_ts = max_close_ts
         
     async def initialize(self):
@@ -49,17 +117,21 @@ class SimpleTradingBot:
         self.kalshi_client = KalshiClient(
             self.config.kalshi,
             self.config.minimum_time_remaining_hours,
+            self.config.max_time_remaining_hours,
             self.config.max_markets_per_event,
             max_close_ts=self.max_close_ts,
         )
         self.research_client = OctagonClient(self.config.octagon)
-        self.openai_client = openai.AsyncOpenAI(api_key=self.config.openai.api_key)
+        self.xai_client = XAIClient(
+            api_key=self.config.xai.api_key,
+            default_model=self.config.xai.model
+        )
         
         # Test connections
         await self.kalshi_client.login()
         self.console.print("[green]✓ Kalshi API connected[/green]")
         self.console.print("[green]✓ Octagon API ready[/green]")
-        self.console.print("[green]✓ OpenAI API ready[/green]")
+        self.console.print(f"[green]✓ XAI/Grok API ready (model: {self.config.xai.model})[/green]")
         
         # Show environment info
         env_color = "green" if self.config.kalshi.use_demo else "yellow"
@@ -72,6 +144,7 @@ class SimpleTradingBot:
         self.console.print(f"[blue]Research batch size: {self.config.research_batch_size}[/blue]")
         self.console.print(f"[blue]Skip existing positions: {self.config.skip_existing_positions}[/blue]")
         self.console.print(f"[blue]Minimum time to event strike: {self.config.minimum_time_remaining_hours} hours (for events with strike_date)[/blue]")
+        self.console.print(f"[blue]Maximum time to event strike: {self.config.max_time_remaining_hours} hours (for events with strike_date)[/blue]")
         self.console.print(f"[blue]Max markets per event: {self.config.max_markets_per_event}[/blue]")
         self.console.print(f"[blue]Max bet amount: ${self.config.max_bet_amount}[/blue]")
         hedging_status = "Enabled" if self.config.enable_hedging else "Disabled"
@@ -583,18 +656,16 @@ class SimpleTradingBot:
             If the research doesn't provide a clear probability for a market, make your best estimate based on the available information.
             """
             
-            # Use Responses API structured outputs
-            from openai_utils import responses_parse_pydantic
-            extraction = await responses_parse_pydantic(
-                self.openai_client,
-                model=self.config.openai.model if self.config.openai.model else "gpt-5",
+            # Use XAI/Grok API for structured probability extraction
+            extraction = await async_chat_completion_parse_pydantic(
+                self.xai_client,
+                model=self.config.xai.model,
                 messages=[
                     {"role": "system", "content": "You are a professional prediction market analyst. Extract probability estimates from research with structured output."},
                     {"role": "user", "content": prompt}
                 ],
                 response_format=ProbabilityExtraction,
-                reasoning_effort="low",
-                text_verbosity="medium",
+                enable_search=False,  # No search needed for probability extraction
             )
 
             return event_ticker, extraction
@@ -1150,18 +1221,16 @@ class SimpleTradingBot:
         """
         
         try:
-            # Use Responses API structured outputs
-            from openai_utils import responses_parse_pydantic
-            analysis = await responses_parse_pydantic(
-                self.openai_client,
-                model=self.config.openai.model,
+            # Use XAI/Grok API for structured betting decisions with search enabled
+            analysis = await async_chat_completion_parse_pydantic(
+                self.xai_client,
+                model=self.config.xai.model,
                 messages=[
                     {"role": "system", "content": "You are a professional prediction market trader."},
                     {"role": "user", "content": prompt}
                 ],
                 response_format=MarketAnalysis,
-                reasoning_effort="low",
-                text_verbosity="medium",
+                enable_search=self.config.xai.enable_search,  # Enable search for latest market info
             )
             
             # Enrich decisions with human-readable names
@@ -1416,36 +1485,51 @@ class SimpleTradingBot:
     async def place_bets(self, analysis: MarketAnalysis, market_odds: Dict[str, Dict[str, Any]], probability_extractions: Dict[str, ProbabilityExtraction]):
         """Place bets based on the analysis."""
         self.console.print(f"\n[bold]Step 6: Placing bets...[/bold]")
+        logger.info("=" * 40)
+        logger.info("TRADE EXECUTION - Starting bet placement")
+        logger.info("=" * 40)
         
         if not analysis.decisions:
             self.console.print("[yellow]No betting decisions to execute[/yellow]")
+            logger.warning("TRADE: No betting decisions available to execute")
             return
         
         actionable_decisions = [d for d in analysis.decisions if d.action != "skip"]
         
         if not actionable_decisions:
             self.console.print("[yellow]No actionable betting decisions to execute[/yellow]")
+            logger.warning("TRADE: All decisions were marked as 'skip' - no actionable bets")
             return
         
         self.console.print(f"Found {len(actionable_decisions)} actionable decisions")
+        logger.info(f"TRADE: Processing {len(actionable_decisions)} actionable betting decisions")
         
         for decision in actionable_decisions:
+            logger.debug(f"TRADE DECISION: {decision.ticker} | Action: {decision.action} | Amount: ${decision.amount} | Confidence: {decision.confidence} | R-Score: {getattr(decision, 'r_score', 'N/A')}")
+            
             if self.config.dry_run:
                 self.console.print(f"[blue]DRY RUN: Would place {decision.action} bet of ${decision.amount} on {decision.ticker}[/blue]")
+                logger.info(f"TRADE DRY RUN: {decision.action} ${decision.amount} on {decision.ticker} - Reason: {decision.reasoning[:100] if decision.reasoning else 'N/A'}...")
             else:
                 # Convert action to Kalshi side format
                 side = "yes" if decision.action == "buy_yes" else "no"
+                logger.info(f"TRADE ORDER SUBMIT: {decision.ticker} | Side: {side} | Amount: ${decision.amount}")
+                
                 result = await self.kalshi_client.place_order(decision.ticker, side, decision.amount)
                 
                 if result.get("success"):
                     self.console.print(f"[green]✓ Placed {decision.action} bet of ${decision.amount} on {decision.ticker}[/green]")
+                    logger.info(f"TRADE ORDER SUCCESS: {decision.ticker} | Side: {side} | Amount: ${decision.amount} | Order ID: {result.get('order_id', 'N/A')}")
                 else:
                     self.console.print(f"[red]✗ Failed to place bet on {decision.ticker}: {result.get('error', 'Unknown error')}[/red]")
+                    logger.error(f"TRADE ORDER FAILED: {decision.ticker} | Side: {side} | Amount: ${decision.amount} | Error: {result.get('error', 'Unknown error')}")
         
         if self.config.dry_run:
             self.console.print("\n[yellow]DRY RUN MODE: No actual bets were placed[/yellow]")
+            logger.info("TRADE: Dry run completed - no actual orders placed")
         else:
             self.console.print(f"\n[green]✓ Completed bet placement[/green]")
+            logger.info("TRADE: All order placements completed")
  
     def save_betting_decisions_to_csv(self, 
                                      analysis: MarketAnalysis, 
@@ -1704,25 +1788,40 @@ class SimpleTradingBot:
 
     async def run(self):
         """Main bot execution."""
+        logger.info("=" * 60)
+        logger.info("BOT EXECUTION STARTED")
+        logger.info("=" * 60)
+        
         try:
             await self.initialize()
+            logger.info(f"Bot initialized - Mode: {'LIVE' if not self.config.dry_run else 'DRY RUN'}")
+            logger.info(f"Config: max_events={self.config.max_events_to_analyze}, max_bet=${self.config.max_bet_amount}, z_threshold={self.config.z_threshold}")
             
             # Execute the main workflow
+            logger.info("Step 1: Fetching top events...")
             events = await self.get_top_events()
             if not events:
                 self.console.print("[red]No events found. Exiting.[/red]")
+                logger.warning("No events found - exiting early")
                 return
+            logger.info(f"Found {len(events)} events")
             
+            logger.info("Step 2: Getting markets for events...")
             event_markets = await self.get_markets_for_events(events)
             if not event_markets:
                 self.console.print("[red]No markets found. Exiting.[/red]")
+                logger.warning("No markets found for events - exiting early")
                 return
+            logger.info(f"Found markets for {len(event_markets)} events")
             
+            logger.info("Step 3: Filtering markets by existing positions...")
             event_markets = await self.filter_markets_by_positions(event_markets)
             if not event_markets:
                 self.console.print("[red]No markets remaining after position filtering. Exiting.[/red]")
+                logger.warning("All markets filtered out due to existing positions - exiting early")
                 return
-            
+            logger.info(f"{len(event_markets)} events remain after position filtering")
+
             # Limit to max_events_to_analyze after position filtering
             if len(event_markets) > self.config.max_events_to_analyze:
                 # Sort filtered events by volume_24h and take top N
@@ -1741,24 +1840,44 @@ class SimpleTradingBot:
                 
                 self.console.print(f"[blue]• Limited to top {len(event_markets)} events by volume after position filtering[/blue]")
             
+            logger.info("Step 4: Researching events with Octagon...")
             research_results = await self.research_events(event_markets)
             if not research_results:
                 self.console.print("[red]No research results. Exiting.[/red]")
+                logger.warning("No research results obtained - exiting early")
                 return
+            logger.info(f"Completed research for {len(research_results)} events")
             
+            logger.info("Step 5: Extracting probabilities from research...")
             probability_extractions = await self.extract_probabilities(research_results, event_markets)
             if not probability_extractions:
                 self.console.print("[red]No probability extractions. Exiting.[/red]")
+                logger.warning("Failed to extract probabilities - exiting early")
                 return
+            logger.info(f"Extracted probabilities for {len(probability_extractions)} events")
             
+            logger.info("Step 6: Getting current market odds...")
             market_odds = await self.get_market_odds(event_markets)
             if not market_odds:
                 self.console.print("[red]No market odds found. Exiting.[/red]")
+                logger.warning("No market odds available - exiting early")
                 return
+            logger.info(f"Retrieved odds for {len(market_odds)} markets")
             
+            logger.info("Step 7: Generating betting decisions...")
             analysis = await self.get_betting_decisions(event_markets, probability_extractions, market_odds)
+            logger.info(f"Generated {len(analysis.decisions) if analysis and analysis.decisions else 0} betting decisions")
+            
+            # Log decision summary
+            if analysis and analysis.decisions:
+                actionable = [d for d in analysis.decisions if d.action != "skip"]
+                skipped = [d for d in analysis.decisions if d.action == "skip"]
+                logger.info(f"Decision summary: {len(actionable)} actionable, {len(skipped)} skipped")
+                for d in actionable:
+                    logger.debug(f"  BET DECISION: {d.ticker} | {d.action} | ${d.amount} | conf={d.confidence} | r_score={getattr(d, 'r_score', 'N/A')}")
             
             # Save betting decisions to CSV with research data
+            logger.info("Step 8: Saving betting decisions to CSV...")
             self.save_betting_decisions_to_csv(
                 analysis=analysis,
                 research_results=research_results,
@@ -1767,20 +1886,26 @@ class SimpleTradingBot:
                 event_markets=event_markets
             )
             
+            logger.info("Step 9: Placing bets...")
             await self.place_bets(analysis, market_odds, probability_extractions)
             
             self.console.print("\n[bold green]Bot execution completed![/bold green]")
+            logger.info("=" * 60)
+            logger.info("BOT EXECUTION COMPLETED SUCCESSFULLY")
+            logger.info("=" * 60)
             
         except Exception as e:
             self.console.print(f"[red]Bot execution error: {e}[/red]")
-            logger.exception("Bot execution failed")
+            logger.exception("Bot execution failed with error")
         
         finally:
             # Clean up
+            logger.debug("Cleaning up API client connections...")
             if self.research_client:
                 await self.research_client.close()
             if self.kalshi_client:
                 await self.kalshi_client.close()
+            logger.debug("Cleanup complete")
 
 
 async def main(live_trading: bool = False, max_close_ts: Optional[int] = None):
@@ -1792,12 +1917,13 @@ async def main(live_trading: bool = False, max_close_ts: Optional[int] = None):
 def cli():
     """Command line interface entry point."""
     parser = argparse.ArgumentParser(
-        description="Simple Kalshi trading bot with Octagon research and OpenAI decision making",
+        description="Simple Kalshi trading bot with Octagon research and XAI/Grok decision making",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   uv run trading-bot                    # Run bot in dry run mode (default)
   uv run trading-bot --live             # Run bot with live trading enabled
+  uv run trading-bot --log-level DEBUG  # Run with debug logging
   uv run trading-bot --help            # Show this help message
   
 Configuration:
@@ -1805,7 +1931,7 @@ Configuration:
     KALSHI_API_KEY=your_kalshi_api_key
     KALSHI_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\\n...\\n-----END RSA PRIVATE KEY-----"
     OCTAGON_API_KEY=your_octagon_api_key
-    OPENAI_API_KEY=your_openai_api_key
+    XAI_API_KEY=your_xai_api_key
     
   Optional settings:
     KALSHI_USE_DEMO=true               # Use demo environment (default: true)
@@ -1816,6 +1942,14 @@ Configuration:
     Z_THRESHOLD=1.5                    # Minimum R-score (z-score) for betting (default: 1.5)
     KELLY_FRACTION=0.5                 # Fraction of Kelly to use for position sizing (default: 0.5)
     BANKROLL=1000.0                    # Total bankroll for Kelly calculations (default: 1000.0)
+    XAI_MODEL=grok-4-latest            # XAI model to use (default: grok-4-latest)
+    XAI_ENABLE_SEARCH=true             # Enable web search (default: true)
+    
+  Logging settings (via .env):
+    LOG_LEVEL=DEBUG                    # Log level: DEBUG, INFO, WARNING, ERROR (default: DEBUG)
+    LOG_DIR=logs                       # Directory for log files (default: logs)
+    LOG_ROTATION=10 MB                 # When to rotate logs (default: 10 MB)
+    LOG_RETENTION=30 days              # How long to keep logs (default: 30 days)
     
   Trading modes:
     Default: Dry run mode - shows what trades would be made without placing real bets
@@ -1835,6 +1969,21 @@ Configuration:
         dest='max_expiration_hours',
         help='Only include markets that close within this many hours from now (minimum 1 hour).'
     )
+    parser.add_argument(
+        '--log-level',
+        type=str,
+        default=None,
+        dest='log_level',
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+        help='Set the logging level (overrides LOG_LEVEL env var)'
+    )
+    parser.add_argument(
+        '--log-dir',
+        type=str,
+        default=None,
+        dest='log_dir',
+        help='Directory for log files (overrides LOG_DIR env var)'
+    )
     
     parser.add_argument(
         '--version',
@@ -1844,6 +1993,27 @@ Configuration:
     
     # Parse arguments
     args = parser.parse_args()
+    
+    # Initialize logging
+    log_level = args.log_level or os.getenv("LOG_LEVEL", "DEBUG")
+    log_dir = args.log_dir or os.getenv("LOG_DIR", "logs")
+    log_rotation = os.getenv("LOG_ROTATION", "10 MB")
+    log_retention = os.getenv("LOG_RETENTION", "30 days")
+    
+    setup_logging(
+        log_dir=log_dir,
+        log_level=log_level,
+        rotation=log_rotation,
+        retention=log_retention
+    )
+    
+    # Log startup info
+    logger.info("=" * 60)
+    logger.info("Kalshi Deep Trading Bot Starting")
+    logger.info("=" * 60)
+    logger.info(f"Mode: {'LIVE TRADING' if args.live else 'DRY RUN'}")
+    if args.max_expiration_hours:
+        logger.info(f"Max expiration filter: {args.max_expiration_hours} hours")
     
     # Try to load config and run bot
     try:
@@ -1855,9 +2025,15 @@ Configuration:
     except Exception as e:
         console = Console()
         console.print(f"[red]Error: {e}[/red]")
+        logger.exception(f"Fatal error during bot execution: {e}")
         console.print("\n[yellow]Please check your .env file configuration.[/yellow]")
         console.print("[yellow]Run with --help for more information.[/yellow]")
+        console.print(f"[yellow]Check logs in '{log_dir}/' for detailed error information.[/yellow]")
         sys.exit(1)
+    finally:
+        logger.info("=" * 60)
+        logger.info("Kalshi Deep Trading Bot Shutdown Complete")
+        logger.info("=" * 60)
 
 
 if __name__ == "__main__":

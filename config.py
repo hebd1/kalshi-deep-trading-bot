@@ -58,15 +58,16 @@ class OctagonConfig(BaseModel):
             raise ValueError("OCTAGON_API_KEY is required. Please set it in your .env file.")
         return v
 
-class OpenAIConfig(BaseModel):
-    """OpenAI API configuration."""
-    api_key: str = Field(..., description="OpenAI API key")
-    model: str = Field(default="gpt-5", description="OpenAI model to use")
+class XAIConfig(BaseModel):
+    """XAI/Grok API configuration."""
+    api_key: str = Field(..., description="XAI API key")
+    model: str = Field(default="grok-4-latest", description="XAI model to use (grok-3-mini-fast, grok-3-mini, grok-3, grok-4-latest)")
+    enable_search: bool = Field(default=True, description="Enable web search for up-to-date information")
     
     @validator('api_key')
     def validate_api_key(cls, v):
-        if not v or v == "your_openai_api_key_here":
-            raise ValueError("OPENAI_API_KEY is required. Please set it in your .env file.")
+        if not v or v == "your_xai_api_key_here":
+            raise ValueError("XAI_API_KEY is required. Please set it in your .env file.")
         return v
 
 def _clean_env_value(value: str) -> str:
@@ -81,7 +82,7 @@ class BotConfig(BaseSettings):
     # API configurations
     kalshi: KalshiConfig = Field(..., description="Kalshi configuration")
     octagon: OctagonConfig = Field(..., description="Octagon configuration")
-    openai: OpenAIConfig = Field(..., description="OpenAI configuration")
+    xai: XAIConfig = Field(..., description="XAI/Grok configuration")
     
     # Bot settings
     dry_run: bool = Field(default=True, description="Run in dry-run mode (overridden by CLI)")
@@ -91,6 +92,7 @@ class BotConfig(BaseSettings):
     research_timeout_seconds: int = Field(default=900, description="Per-event research timeout in seconds")
     skip_existing_positions: bool = Field(default=True, description="Skip betting on markets where we already have positions")
     minimum_time_remaining_hours: float = Field(default=1.0, description="Minimum hours remaining before event strike to consider it tradeable (only applied to events with strike_date)")
+    max_time_remaining_hours: float = Field(default=168.0, description="Maximum hours remaining before event strike to consider it tradeable (only applied to events with strike_date). Set to high value to disable.")
     max_markets_per_event: int = Field(default=10, description="Maximum number of markets per event to analyze (selects top N markets by volume)")
     # Legacy alpha threshold (deprecated - use R-score filtering instead)
     minimum_alpha_threshold: float = Field(default=2.0, description="DEPRECATED: Use z_threshold and enable_r_score_filtering instead")
@@ -136,15 +138,16 @@ class BotConfig(BaseSettings):
             base_url=os.getenv("OCTAGON_BASE_URL", "https://api.octagon.ai")
         )
         
-        openai_config = OpenAIConfig(
-            api_key=os.getenv("OPENAI_API_KEY", ""),
-            model=os.getenv("OPENAI_MODEL", "gpt-5")
+        xai_config = XAIConfig(
+            api_key=os.getenv("XAI_API_KEY", ""),
+            model=os.getenv("XAI_MODEL", "grok-4-latest"),
+            enable_search=os.getenv("XAI_ENABLE_SEARCH", "true").lower() == "true"
         )
         
         data.update({
             "kalshi": kalshi_config,
             "octagon": octagon_config,
-            "openai": openai_config,
+            "xai": xai_config,
             "dry_run": True,  # Default to dry run, overridden by CLI
             "max_bet_amount": float(_clean_env_value(os.getenv("MAX_BET_AMOUNT", "100.0"))),
             "max_events_to_analyze": int(_clean_env_value(os.getenv("MAX_EVENTS_TO_ANALYZE", "50"))),
@@ -152,6 +155,7 @@ class BotConfig(BaseSettings):
             "research_timeout_seconds": int(_clean_env_value(os.getenv("RESEARCH_TIMEOUT_SECONDS", "900"))),
             "skip_existing_positions": _clean_env_value(os.getenv("SKIP_EXISTING_POSITIONS", "true")).lower() == "true",
             "minimum_time_remaining_hours": float(_clean_env_value(os.getenv("MINIMUM_TIME_REMAINING_HOURS", "1.0"))),
+            "max_time_remaining_hours": float(_clean_env_value(os.getenv("MAX_TIME_REMAINING_HOURS", "168.0"))),
             "max_markets_per_event": int(_clean_env_value(os.getenv("MAX_MARKETS_PER_EVENT", "10"))),
             "minimum_alpha_threshold": float(_clean_env_value(os.getenv("MINIMUM_ALPHA_THRESHOLD", "2.0"))),
             # Risk-adjusted trading parameters

@@ -25,12 +25,19 @@ OCTAGON_API_KEY=your_octagon_api_key_here
 OCTAGON_BASE_URL=https://api-gateway.octagonagents.com/v1
 
 # =============================================================================
-# OPENAI API CONFIGURATION
+# XAI/GROK API CONFIGURATION
 # =============================================================================
 
-# OpenAI API for structured betting decisions
-OPENAI_API_KEY=your_openai_api_key_here
-OPENAI_MODEL=gpt-5
+# XAI API for structured betting decisions with web search
+# Get your API key at https://console.x.ai/
+XAI_API_KEY=your_xai_api_key_here
+XAI_MODEL=grok-4-latest
+# Available models:
+#   - grok-3-mini-fast: Quick, simple tasks
+#   - grok-3-mini: Standard analysis
+#   - grok-3: Complex reasoning
+#   - grok-4-latest: Most capable, with web search (recommended)
+XAI_ENABLE_SEARCH=true  # Enable web search for up-to-date market information
 
 # =============================================================================
 # BOT CONFIGURATION
@@ -52,6 +59,22 @@ ENABLE_HEDGING=true           # Enable hedging to minimize risk and protect down
 HEDGE_RATIO=0.25              # Default hedge ratio (0.25 = hedge 25% of main bet on opposite side)
 MIN_CONFIDENCE_FOR_HEDGING=0.6 # Only hedge bets with confidence below this threshold (0.6 = hedge when confidence < 60%)
 MAX_HEDGE_AMOUNT=50.0         # Maximum hedge amount per bet in dollars
+
+# =============================================================================
+# LOGGING CONFIGURATION
+# =============================================================================
+
+# Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+LOG_LEVEL=DEBUG
+
+# Directory where log files are stored
+LOG_DIR=logs
+
+# When to rotate log files (e.g., "10 MB", "1 day", "00:00")
+LOG_ROTATION=10 MB
+
+# How long to keep old log files (e.g., "30 days", "10 files")
+LOG_RETENTION=30 days
 
 # =============================================================================
 # SETUP INSTRUCTIONS

@@ -4,6 +4,7 @@ Simple Kalshi API Client with RSA authentication
 
 import hashlib
 import json
+import uuid
 import time
 import base64
 from typing import Dict, List, Optional, Any
@@ -19,12 +20,13 @@ from config import KalshiConfig
 class KalshiClient:
     """Simple Kalshi API client for basic trading operations."""
     
-    def __init__(self, config: KalshiConfig, minimum_time_remaining_hours: float = 1.0, max_markets_per_event: int = 10, max_close_ts: Optional[int] = None):
+    def __init__(self, config: KalshiConfig, minimum_time_remaining_hours: float = 1.0, max_time_remaining_hours: float = 168.0, max_markets_per_event: int = 10, max_close_ts: Optional[int] = None):
         self.config = config
         self.base_url = config.base_url
         self.api_key = config.api_key
         self.private_key = config.private_key
         self.minimum_time_remaining_hours = minimum_time_remaining_hours
+        self.max_time_remaining_hours = max_time_remaining_hours
         self.max_markets_per_event = max_markets_per_event
         self.max_close_ts = max_close_ts
         self.client = None
@@ -52,6 +54,7 @@ class KalshiClient:
             enriched_events = []
             now = datetime.now(timezone.utc)
             minimum_time_remaining = self.minimum_time_remaining_hours * 3600  # Convert hours to seconds
+            maximum_time_remaining = self.max_time_remaining_hours * 3600  # Convert hours to seconds
             filter_enabled = self.max_close_ts is not None
             markets_seen = 0
             markets_kept = 0
@@ -133,9 +136,14 @@ class KalshiClient:
                         time_remaining = (strike_date - now).total_seconds()
                         time_remaining_hours = time_remaining / 3600
                         
-                        # Optional: Skip events that are very close to striking
-                        if time_remaining > 0 and time_remaining < minimum_time_remaining:
-                            logger.info(f"Event {event.get('event_ticker', '')} strikes in {time_remaining/60:.1f} minutes, skipping")
+                        # Optional: Skip events that are very close to striking or too far in the future
+                        if time_remaining <= 0 or time_remaining < minimum_time_remaining or time_remaining > maximum_time_remaining:
+                            if time_remaining <= 0:
+                                logger.info(f"Event {event.get('event_ticker', '')} has already struck, skipping")
+                            elif time_remaining < minimum_time_remaining:
+                                logger.info(f"Event {event.get('event_ticker', '')} strikes in {time_remaining/60:.1f} minutes, skipping")
+                            else:
+                                logger.info(f"Event {event.get('event_ticker', '')} strikes in {time_remaining_hours:.1f} hours, too far in future, skipping")
                             continue
                         
                     except (ValueError, TypeError) as e:
@@ -393,30 +401,51 @@ class KalshiClient:
             logger.error(f"Error checking position for {ticker}: {e}")
             return False  # If we can't check, assume no position to be safe
 
-    async def place_order(self, ticker: str, side: str, amount: float) -> Dict[str, Any]:
-        """Place a simple market order."""
+    async def place_order(
+        self,
+        ticker: str,
+        side: str,           # "yes" or "no"
+        amount: float        # maximum USD you're willing to spend (for buy)
+    ) -> Dict[str, Any]:
+        """
+        Place a market buy order on Kalshi with budget protection.
+        Uses worst-case price (99¢) + buy_max_cost to achieve true market behavior.
+        """
+        if side not in ("yes", "no"):
+            raise ValueError("side must be 'yes' or 'no'")
+
+        if amount <= 0:
+            raise ValueError("amount must be positive")
+
+        logger.info(f"ORDER SUBMIT: {ticker} | Side: {side} | Max Amount: ${amount:.2f}")
+
         try:
-            # Generate a unique client order ID
-            import uuid
             client_order_id = str(uuid.uuid4())
-            
-            # Convert dollar amount to cents for buy_max_cost
-            buy_max_cost_cents = int(amount * 100)
-            
-            # For market orders, we want to spend up to our dollar amount
-            # Set a high count but limit with buy_max_cost to control actual spending
-            max_contracts = 1000  # High number to ensure we can buy up to our budget
-            
+
+            amount_cents = int(round(amount * 100))
+
+            # Calculate conservative count assuming worst-case fill at 99¢
+            count = amount_cents // 99 + (1 if amount_cents % 99 != 0 else 0)
+            max_cost_cents = count * 99  # This is the critical protection field
+
             order_data = {
                 "ticker": ticker,
-                "side": side,  # "yes" or "no"
                 "action": "buy",
+                "side": side,
                 "type": "market",
                 "client_order_id": client_order_id,
-                "count": max_contracts,  # High count to allow buying up to budget
-                "buy_max_cost": buy_max_cost_cents  # Actual spending limit in cents
+                "count": count,
+                "buy_max_cost": max_cost_cents
             }
-            
+
+            # Required: include exactly one price field (use max 99¢)
+            if side == "yes":
+                order_data["yes_price"] = 99
+            else:  # side == "no"
+                order_data["no_price"] = 99
+
+            logger.debug(f"ORDER DATA: {json.dumps(order_data, indent=2)}")
+
             headers = await self._get_headers("POST", "/trade-api/v2/portfolio/orders")
             response = await self.client.post(
                 "/trade-api/v2/portfolio/orders",
@@ -424,15 +453,30 @@ class KalshiClient:
                 json=order_data
             )
             response.raise_for_status()
-            
+
             result = response.json()
-            logger.info(f"Order placed: {ticker} {side} ${amount} (max cost: {buy_max_cost_cents} cents)")
-            return {"success": True, "order_id": result.get("order_id", ""), "client_order_id": client_order_id}
-            
+            order_info = result.get("order", result)
+
+            order_id = order_info.get("order_id", "")
+            logger.info(
+                f"ORDER SUCCESS: {ticker} | Side: {side} | "
+                f"Max Amount: ${amount:.2f} | Order ID: {order_id}"
+            )
+
+            return {
+                "success": True,
+                "order_id": order_id,
+                "client_order_id": client_order_id,
+                "response": result
+            }
+
+        except httpx.HTTPStatusError as e:
+            error_body = e.response.text if hasattr(e, "response") else str(e)
+            logger.error(f"ORDER FAILED (HTTP {e.response.status_code}): {error_body}")
+            return {"success": False, "error": f"HTTP {e.response.status_code}: {error_body}"}
         except Exception as e:
-            logger.error(f"Error placing order: {e}")
+            logger.error(f"ORDER FAILED: {str(e)}")
             return {"success": False, "error": str(e)}
-    
     async def _get_headers(self, method: str, path: str) -> Dict[str, str]:
         """Generate headers with RSA signature."""
         timestamp = str(int(time.time() * 1000))
