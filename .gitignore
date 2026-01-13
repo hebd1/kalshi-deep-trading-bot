@@ -108,5 +108,7 @@ kalshi_config.json
 octagon_config.json 
 .kalshi.demo.pem
 .kalshi.pem
+kalshi_private_key.pem
+kalshi_private_key.prod.pem
 
 *betting_decisions_*

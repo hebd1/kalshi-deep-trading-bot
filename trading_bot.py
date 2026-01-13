@@ -619,6 +619,11 @@ class SimpleTradingBot:
     async def _extract_probabilities_for_event(self, event_ticker: str, research_text: str, 
                                               event_markets: Dict[str, Dict[str, Any]]) -> tuple[str, Optional[ProbabilityExtraction]]:
         """Extract probabilities for a single event."""
+        # Skip if research failed or is empty
+        if research_text.startswith("Error researching event") or not research_text.strip():
+            logger.warning(f"Skipping probability extraction for {event_ticker} due to research failure or empty research")
+            return event_ticker, None
+            
         try:
             # Get market information for this event
             event_data = event_markets.get(event_ticker, {})
@@ -656,6 +661,10 @@ class SimpleTradingBot:
             If the research doesn't provide a clear probability for a market, make your best estimate based on the available information.
             """
             
+            # Debug logging
+            logger.debug(f"Research text for {event_ticker} (first 500 chars): {research_text[:500]}")
+            logger.debug(f"Probability extraction prompt for {event_ticker}: {prompt}")
+            
             # Use XAI/Grok API for structured probability extraction
             extraction = await async_chat_completion_parse_pydantic(
                 self.xai_client,
@@ -667,6 +676,9 @@ class SimpleTradingBot:
                 response_format=ProbabilityExtraction,
                 enable_search=False,  # No search needed for probability extraction
             )
+
+            # Debug logging for extraction result
+            logger.debug(f"Probability extraction result for {event_ticker}: {extraction}")
 
             return event_ticker, extraction
             
