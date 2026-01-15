@@ -67,7 +67,7 @@ class XAIClient:
         search_from_date: Optional[str] = None,
         search_to_date: Optional[str] = None,
         max_retries: int = 3,
-        timeout: int = 120,
+        timeout: int = 360,
         temperature: Optional[float] = None,
     ) -> Dict[str, Any]:
         """

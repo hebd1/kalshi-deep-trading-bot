@@ -91,6 +91,7 @@ def setup_logging(log_dir: str = "logs", log_level: str = "DEBUG", rotation: str
 
 from kalshi_client import KalshiClient
 from research_client import OctagonClient
+from xai_research_client import XAIResearchClient
 from betting_models import BettingDecision, MarketAnalysis, ProbabilityExtraction
 from config import load_config
 from xai_utils import XAIClient, async_chat_completion_parse_pydantic, MODEL_PREMIUM
@@ -109,6 +110,10 @@ class SimpleTradingBot:
         self.xai_client = None
         self.max_close_ts = max_close_ts
         
+        # If max_close_ts not provided via CLI, use config value
+        if self.max_close_ts is None:
+            self.max_close_ts = int(time.time()) + int(self.config.max_time_remaining_hours * 3600)
+        
     async def initialize(self):
         """Initialize all API clients."""
         self.console.print("[bold blue]Initializing trading bot...[/bold blue]")
@@ -121,7 +126,15 @@ class SimpleTradingBot:
             self.config.max_markets_per_event,
             max_close_ts=self.max_close_ts,
         )
-        self.research_client = OctagonClient(self.config.octagon)
+        
+        # Initialize research client based on configuration
+        if self.config.research_provider.lower() == "xai":
+            self.research_client = XAIResearchClient(self.config.xai)
+            self.console.print("[blue]Using XAI Grok for deep research[/blue]")
+        else:
+            self.research_client = OctagonClient(self.config.octagon)
+            self.console.print("[blue]Using Octagon AI for deep research[/blue]")
+            
         self.xai_client = XAIClient(
             api_key=self.config.xai.api_key,
             default_model=self.config.xai.model
@@ -200,7 +213,7 @@ class SimpleTradingBot:
             
             # Kelly fraction: f_kelly = (p-y)/(1-y)
             # This gives the optimal fraction of bankroll to bet
-            if y >= 1:
+            if y >= 1 or y <= 0:
                 kelly_fraction = 0.0
             else:
                 kelly_fraction = (p - y) / (1 - y)
@@ -227,8 +240,13 @@ class SimpleTradingBot:
         Returns:
             Position size in dollars
         """
-        if not self.config.enable_kelly_sizing or kelly_fraction <= 0:
+        # If Kelly sizing disabled, fall back to configured max bet amount.
+        if not self.config.enable_kelly_sizing:
             return self.config.max_bet_amount
+
+        # If Kelly suggests zero or negative fraction, return a minimal conservative bet (not the max).
+        if kelly_fraction <= 0:
+            return max(1.0, min(self.config.max_bet_amount, self.config.bankroll * 0.01))
         
         # Apply fractional Kelly (e.g., half-Kelly)
         adjusted_kelly = kelly_fraction * self.config.kelly_fraction
@@ -556,7 +574,7 @@ class SimpleTradingBot:
         return probabilities
 
     async def research_events(self, event_markets: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
-        """Research each event and its markets using Octagon Deep Research."""
+        """Research each event and its markets using the configured deep research provider."""
         self.console.print(f"\n[bold]Step 3: Researching {len(event_markets)} events...[/bold]")
         
         research_results = {}
@@ -1362,23 +1380,39 @@ class SimpleTradingBot:
                 validated_decisions.append(skip_decision)
                 continue
             
-            # Find current market price from market_odds dictionary
+            # Find current market prices from market_odds dictionary and normalize them
             market_odds_data = None
+            yes_price = None
+            no_price = None
             if decision.ticker in market_odds:
                 ticker_odds = market_odds[decision.ticker]
+                # Raw prices are expected in cents (0-100). Normalize to 0-1.
+                yes_price = ticker_odds.get('yes_ask')
+                no_price = ticker_odds.get('no_ask')
+
+                yes_price = (yes_price / 100.0) if isinstance(yes_price, (int, float)) and yes_price is not None else None
+                no_price = (no_price / 100.0) if isinstance(no_price, (int, float)) and no_price is not None else None
+
+                # If one side is missing or zero, attempt to infer the complementary side (1 - other_side)
+                if (not yes_price or yes_price <= 0) and (no_price and 0 < no_price < 1):
+                    yes_price = max(0.0, 1.0 - no_price)
+                if (not no_price or no_price <= 0) and (yes_price and 0 < yes_price < 1):
+                    no_price = max(0.0, 1.0 - yes_price)
+
+                # Choose the correct side price for this action
                 if decision.action == "buy_yes":
-                    market_odds_data = ticker_odds.get('yes_ask', 0) / 100.0  # Convert to probability
+                    market_odds_data = yes_price
                 elif decision.action == "buy_no":
-                    market_odds_data = ticker_odds.get('no_ask', 0) / 100.0  # Convert to probability
-            
-            if market_odds_data is None or market_odds_data == 0:
-                # If we can't find market odds, skip the bet
+                    market_odds_data = no_price
+
+            # If we still don't have a usable market price, skip the bet
+            if market_odds_data is None or market_odds_data <= 0 or market_odds_data >= 1:
                 skip_decision = BettingDecision(
                     ticker=decision.ticker,
                     action="skip",
                     confidence=decision.confidence,
                     amount=0.0,
-                    reasoning=f"Skipped due to missing market odds",
+                    reasoning=f"Skipped due to missing or invalid market odds for side {decision.action}",
                     event_name=decision.event_name,
                     market_name=decision.market_name
                 )
@@ -1399,7 +1433,11 @@ class SimpleTradingBot:
             
             # Use R-score (z-score) filtering - the new standard
             if risk_metrics["r_score"] >= self.config.z_threshold:
-                should_accept = True
+                # Also require the expected return to be positive and aligned with the action
+                if risk_metrics["expected_return"] > 0:
+                    should_accept = True
+                else:
+                    rejection_reason = f"Expected return non-positive ({risk_metrics['expected_return']:.4f}) despite R-score {risk_metrics['r_score']:.2f}"
             else:
                 rejection_reason = f"R-score {risk_metrics['r_score']:.2f} below z-threshold {self.config.z_threshold:.2f}"
             

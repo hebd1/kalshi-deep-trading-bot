@@ -84,6 +84,9 @@ class BotConfig(BaseSettings):
     octagon: OctagonConfig = Field(..., description="Octagon configuration")
     xai: XAIConfig = Field(..., description="XAI/Grok configuration")
     
+    # Research provider selection
+    research_provider: str = Field(default="octagon", description="Research provider to use: 'octagon' or 'xai'")
+    
     # Bot settings
     dry_run: bool = Field(default=True, description="Run in dry-run mode (overridden by CLI)")
     max_bet_amount: float = Field(default=100.0, description="Maximum bet amount per market")
@@ -148,6 +151,7 @@ class BotConfig(BaseSettings):
             "kalshi": kalshi_config,
             "octagon": octagon_config,
             "xai": xai_config,
+            "research_provider": os.getenv("RESEARCH_PROVIDER", "octagon"),
             "dry_run": True,  # Default to dry run, overridden by CLI
             "max_bet_amount": float(_clean_env_value(os.getenv("MAX_BET_AMOUNT", "100.0"))),
             "max_events_to_analyze": int(_clean_env_value(os.getenv("MAX_EVENTS_TO_ANALYZE", "50"))),

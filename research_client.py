@@ -3,6 +3,7 @@ Simple Octagon Deep Research API client using httpx.
 """
 import httpx
 import json
+import datetime
 from typing import Dict, Any, Optional, List
 from loguru import logger
 from config import OctagonConfig
@@ -59,6 +60,8 @@ class OctagonClient:
             
             prompt = f"""
             You are a prediction market expert. Research this event and predict the probability for each market independently.
+            
+            Current UTC time: {datetime.datetime.utcnow().isoformat()}
             
             {event_info}
             

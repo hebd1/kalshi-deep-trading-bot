@@ -426,7 +426,11 @@ class KalshiClient:
 
             # Calculate conservative count assuming worst-case fill at 99¢
             count = amount_cents // 99 + (1 if amount_cents % 99 != 0 else 0)
-            max_cost_cents = count * 99  # This is the critical protection field
+            # Ensure the buy_max_cost is the user's budget (in cents) so we never
+            # spend more than `amount`. The `count` represents a requested
+            # maximum number of contracts at worst-case price (99¢); the
+            # `buy_max_cost` strictly caps the total spend.
+            max_cost_cents = amount_cents
 
             order_data = {
                 "ticker": ticker,
